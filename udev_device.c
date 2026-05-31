@@ -55,9 +55,12 @@
 struct udev_device {
     struct udev_list_entry properties;
     struct udev_list_entry sysattrs;
+    struct udev_list_entry tags;
+    struct udev_list_entry current_tags;
     struct udev_device *parent;
     struct udev *udev;
     int refcount;
+    int db_loaded;
 };
 
 const char *udev_device_get_syspath(struct udev_device *udev_device)
@@ -208,8 +211,90 @@ const char *udev_device_get_action(struct udev_device *udev_device)
     return udev_device_get_property_value(udev_device, "ACTION");
 }
 
-/* XXX NOT IMPLEMENTED */ int udev_device_has_tag(struct udev_device *udev_device, const char *tag)
+static void set_tags_from_db(struct udev_device *udev_device)
 {
+    const char *subsystem, *sysname, *major, *minor, *ifindex;
+    char path[PATH_MAX], line[LINE_MAX], *nl;
+    FILE *fp;
+    int c;
+
+    if (udev_device->db_loaded) {
+        return;
+    }
+
+    udev_device->db_loaded = 1;
+
+    subsystem = udev_device_get_property_value(udev_device, "SUBSYSTEM");
+    sysname = udev_device_get_property_value(udev_device, "SYSNAME");
+    major = udev_device_get_property_value(udev_device, "MAJOR");
+    minor = udev_device_get_property_value(udev_device, "MINOR");
+
+    if (major && minor) {
+        snprintf(path, sizeof(path), "/run/udev/data/%c%s:%s",
+                 (subsystem && strcmp(subsystem, "block") == 0) ? 'b' : 'c',
+                 major, minor);
+    }
+    else if (subsystem && strcmp(subsystem, "net") == 0 &&
+             (ifindex = udev_device_get_sysattr_value(udev_device, "ifindex"))) {
+        snprintf(path, sizeof(path), "/run/udev/data/n%s", ifindex);
+    }
+    else if (subsystem && sysname) {
+        snprintf(path, sizeof(path), "/run/udev/data/+%s:%s", subsystem, sysname);
+    }
+    else {
+        return;
+    }
+
+    fp = fopen(path, "r");
+
+    if (!fp) {
+        return;
+    }
+
+    while (fgets(line, sizeof(line), fp)) {
+        nl = strchr(line, '\n');
+
+        if (!nl) {
+            /* line longer than buffer - drain and skip */
+            while ((c = fgetc(fp)) != EOF && c != '\n') {
+                ;
+            }
+            continue;
+        }
+
+        *nl = '\0';
+
+        if (strncmp(line, "G:", 2) == 0) {
+            udev_list_entry_add(&udev_device->tags, line + 2, NULL, 0);
+        }
+        else if (strncmp(line, "Q:", 2) == 0) {
+            udev_list_entry_add(&udev_device->current_tags, line + 2, NULL, 0);
+        }
+    }
+
+    fclose(fp);
+}
+
+int udev_device_has_tag(struct udev_device *udev_device, const char *tag)
+{
+    struct udev_list_entry *list_entry;
+
+    if (!udev_device || !tag) {
+        return 0;
+    }
+
+    set_tags_from_db(udev_device);
+
+    list_entry = udev_list_entry_get_next(&udev_device->tags);
+
+    while (list_entry) {
+        if (strcmp(udev_list_entry_get_name(list_entry), tag) == 0) {
+            return 1;
+        }
+
+        list_entry = udev_list_entry_get_next(list_entry);
+    }
+
     return 0;
 }
 
@@ -223,14 +308,24 @@ struct udev_list_entry *udev_device_get_properties_list_entry(struct udev_device
     return udev_device ? udev_list_entry_get_next(&udev_device->properties) : NULL;
 }
 
-/* XXX NOT IMPLEMENTED */ struct udev_list_entry *udev_device_get_tags_list_entry(struct udev_device *udev_device)
+struct udev_list_entry *udev_device_get_tags_list_entry(struct udev_device *udev_device)
 {
-    return NULL;
+    if (!udev_device) {
+        return NULL;
+    }
+
+    set_tags_from_db(udev_device);
+    return udev_list_entry_get_next(&udev_device->tags);
 }
 
-/* XXX NOT IMPLEMENTED */ struct udev_list_entry *udev_device_get_current_tags_list_entry(struct udev_device *udev_device)
+struct udev_list_entry *udev_device_get_current_tags_list_entry(struct udev_device *udev_device)
 {
-    return NULL;
+    if (!udev_device) {
+        return NULL;
+    }
+
+    set_tags_from_db(udev_device);
+    return udev_list_entry_get_next(&udev_device->current_tags);
 }
 
 struct udev_list_entry *udev_device_get_sysattr_list_entry(struct udev_device *udev_device)
@@ -567,6 +662,8 @@ struct udev_device *udev_device_new_from_syspath(struct udev *udev, const char *
 
     udev_list_entry_init(&udev_device->properties);
     udev_list_entry_init(&udev_device->sysattrs);
+    udev_list_entry_init(&udev_device->tags);
+    udev_list_entry_init(&udev_device->current_tags);
 
     if (set_properties_from_uevent(udev_device, path) == -1) {
         free(udev_device);
@@ -662,6 +759,8 @@ struct udev_device *udev_device_new_from_uevent(struct udev *udev, char *buf, si
 
     udev_list_entry_init(&udev_device->properties);
     udev_list_entry_init(&udev_device->sysattrs);
+    udev_list_entry_init(&udev_device->tags);
+    udev_list_entry_init(&udev_device->current_tags);
 
     for (end = buf + len; buf < end; buf += strlen(buf) + 1) {
        if (strncmp(buf, "DEVPATH=", 8) == 0) {
@@ -751,6 +850,8 @@ struct udev_device *udev_device_unref(struct udev_device *udev_device)
 
     udev_list_entry_free_all(&udev_device->properties);
     udev_list_entry_free_all(&udev_device->sysattrs);
+    udev_list_entry_free_all(&udev_device->tags);
+    udev_list_entry_free_all(&udev_device->current_tags);
 
     free(udev_device);
     return NULL;

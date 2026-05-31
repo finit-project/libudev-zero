@@ -32,6 +32,7 @@ struct udev_enumerate {
     struct udev_list_entry property_match;
     struct udev_list_entry sysattr_match;
     struct udev_list_entry sysname_match;
+    struct udev_list_entry tag_match;
     struct udev_list_entry devices;
     struct udev *udev;
     int refcount;
@@ -67,9 +68,9 @@ int udev_enumerate_add_match_sysname(struct udev_enumerate *udev_enumerate, cons
     return udev_enumerate ? !!udev_list_entry_add(&udev_enumerate->sysname_match, sysname, NULL, 0) - 1 : -1;
 }
 
-/* XXX NOT IMPLEMENTED */ int udev_enumerate_add_match_tag(struct udev_enumerate *udev_enumerate, const char *tag)
+int udev_enumerate_add_match_tag(struct udev_enumerate *udev_enumerate, const char *tag)
 {
-    return 0;
+    return udev_enumerate ? !!udev_list_entry_add(&udev_enumerate->tag_match, tag, NULL, 0) - 1 : -1;
 }
 
 /* XXX NOT IMPLEMENTED */ int udev_enumerate_add_match_parent(struct udev_enumerate *udev_enumerate, struct udev_device *parent)
@@ -223,6 +224,27 @@ static int filter_sysattr(struct udev_enumerate *udev_enumerate, struct udev_dev
     return 1;
 }
 
+static int filter_tag(struct udev_enumerate *udev_enumerate, struct udev_device *udev_device)
+{
+    struct udev_list_entry *list_entry;
+
+    list_entry = udev_list_entry_get_next(&udev_enumerate->tag_match);
+
+    if (!list_entry) {
+        return 1;
+    }
+
+    while (list_entry) {
+        if (!udev_device_has_tag(udev_device, udev_list_entry_get_name(list_entry))) {
+            return 0;
+        }
+
+        list_entry = udev_list_entry_get_next(list_entry);
+    }
+
+    return 1;
+}
+
 static void add_device(struct udev_enumerate *udev_enumerate, const char *path)
 {
     struct udev_device *udev_device;
@@ -236,7 +258,8 @@ static void add_device(struct udev_enumerate *udev_enumerate, const char *path)
     if (!filter_subsystem(udev_enumerate, udev_device) ||
         !filter_sysname(udev_enumerate, udev_device) ||
         !filter_property(udev_enumerate, udev_device) ||
-        !filter_sysattr(udev_enumerate, udev_device)) {
+        !filter_sysattr(udev_enumerate, udev_device) ||
+        !filter_tag(udev_enumerate, udev_device)) {
         udev_device_unref(udev_device);
         return;
     }
@@ -337,6 +360,7 @@ struct udev_enumerate *udev_enumerate_new(struct udev *udev)
     udev_list_entry_init(&udev_enumerate->property_match);
     udev_list_entry_init(&udev_enumerate->sysattr_match);
     udev_list_entry_init(&udev_enumerate->sysname_match);
+    udev_list_entry_init(&udev_enumerate->tag_match);
     udev_list_entry_init(&udev_enumerate->devices);
 
     return udev_enumerate;
@@ -368,6 +392,7 @@ struct udev_enumerate *udev_enumerate_unref(struct udev_enumerate *udev_enumerat
     udev_list_entry_free_all(&udev_enumerate->property_match);
     udev_list_entry_free_all(&udev_enumerate->sysattr_match);
     udev_list_entry_free_all(&udev_enumerate->sysname_match);
+    udev_list_entry_free_all(&udev_enumerate->tag_match);
     udev_list_entry_free_all(&udev_enumerate->devices);
 
     free(udev_enumerate);
